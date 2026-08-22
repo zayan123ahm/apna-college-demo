@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Dino Runner</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background: #f7f7f7;
+      font-family: "Courier New", Courier, monospace;
+      touch-action: manipulation;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    h1 {
+      font-size: 1.25rem;
+      color: #535353;
+      margin-bottom: 0.5rem;
+      letter-spacing: 0.05em;
+    }
+
+    #gameCanvas {
+      display: block;
+      border: 2px solid #535353;
+      background: #fff;
+      cursor: pointer;
+      max-width: 100%;
+    }
+
+    .hint {
+      margin-top: 0.75rem;
+      font-size: 0.75rem;
+      color: #888;
+    }
+  </style>
+</head>
+<body>
+  <h1>DINO RUNNER</h1>
+  <canvas id="gameCanvas" width="800" height="200"></canvas>
+  <p class="hint">Space / Tap / Click to jump</p>
+
+  <script>
+    (function () {
+      "use strict";
+
+      // ─── Canvas setup ───────────────────────────────────────────────
+      const canvas = document.getElementById("gameCanvas");
+      const ctx = canvas.getContext("2d");
+
+      const W = canvas.width;
+      const H = canvas.height;
+      const GROUND_Y = H - 20;
+
+      // ─── Game states ──────────────────────────────────────────────────
+      const STATE = { IDLE: 0, PLAYING: 1, GAME_OVER: 2 };
+
+      // ─── Physics constants ────────────────────────────────────────────
+      const GRAVITY = 0.6;
+      const JUMP_VELOCITY = -11;
+      const BASE_SPEED = 5;
+      const MAX_SPEED = 14;
+      const SPEED_INCREMENT = 0.0008;
+
+      // ─── Player ───────────────────────────────────────────────────────
+      const player = {
+        x: 50,
+        y: GROUND_Y,
+        width: 24,
+        height: 28,
+        vy: 0,
+        grounded: true,
+        legFrame: 0,
+      };
+
+      // ─── Obstacles ────────────────────────────────────────────────────
+      const obstacles = [];
+      let spawnTimer = 0;
+      let minSpawnGap = 90;
+      let maxSpawnGap = 180;
+
+      // ─── Score & speed ────────────────────────────────────────────────
+      let state = STATE.IDLE;
+      let score = 0;
+      let highScore = parseInt(localStorage.getItem("dinoHighScore") || "0", 10);
+      let gameSpeed = BASE_SPEED;
+      let frameCount = 0;
+
+      // ─── Day / night cycle (every 100 points) ─────────────────────────
+      const DAY_BG = "#ffffff";
+      const NIGHT_BG = "#2b2b2b";
+      const DAY_GROUND = "#535353";
+      const NIGHT_GROUND = "#888888";
+      const DAY_PLAYER = "#535353";
+      const NIGHT_PLAYER = "#cccccc";
+      const DAY_OBS = "#535353";
+      const NIGHT_OBS = "#aaaaaa";
+      const DAY_TEXT = "#535353";
+      const NIGHT_TEXT = "#cccccc";
+      const POINTS_PER_CYCLE = 100;
+
+      function isNight() {
+        return Math.floor(score / POINTS_PER_CYCLE) % 2 === 1;
+      }
+
+      function lerpColor(a, b, t) {
+        const parse = (hex) => [
+          parseInt(hex.slice(1, 3), 16),
+          parseInt(hex.slice(3, 5), 16),
+          parseInt(hex.slice(5, 7), 16),
+        ];
+        const ca = parse(a);
+        const cb = parse(b);
+        const r = Math.round(ca[0] + (cb[0] - ca[0]) * t);
+        const g = Math.round(ca[1] + (cb[1] - ca[1]) * t);
+        const bl = Math.round(ca[2] + (cb[2] - ca[2]) * t);
+        return "rgb(" + r + "," + g + "," + bl + ")";
+      }
+
+      // Smooth transition within each 100-point segment
+      function getTheme() {
+        const phase = (score % POINTS_PER_CYCLE) / POINTS_PER_CYCLE;
+        const night = isNight();
+        const t = phase < 0.15 ? phase / 0.15 : phase > 0.85 ? (1 - phase) / 0.15 : (night ? 1 : 0);
+        const fromNight = night ? (phase < 0.15 ? 0 : 1) : (phase > 0.85 ? 1 : 0);
+        const blend = night ? (fromNight ? t : 1) : (fromNight ? 1 - t : 0);
+
+        return {
+          bg: lerpColor(DAY_BG, NIGHT_BG, blend),
+          ground: lerpColor(DAY_GROUND, NIGHT_GROUND, blend),
+          player: lerpColor(DAY_PLAYER, NIGHT_PLAYER, blend),
+          obstacle: lerpColor(DAY_OBS, NIGHT_OBS, blend),
+          text: lerpColor(DAY_TEXT, NIGHT_TEXT, blend),
+        };
+      }
+
+      // ─── Input ────────────────────────────────────────────────────────
+      function jump() {
+        if (state === STATE.IDLE) {
+          startGame();
+          return;
+        }
+        if (state === STATE.GAME_OVER) {
+          resetGame();
+          startGame();
+          return;
+        }
+        if (state === STATE.PLAYING && player.grounded) {
+          player.vy = JUMP_VELOCITY;
+          player.grounded = false;
+        }
+      }
+
+      function onKeyDown(e) {
+        if (e.code === "Space" || e.key === " ") {
+          e.preventDefault();
+          jump();
+        }
+      }
+
+      canvas.addEventListener("pointerdown", function (e) {
+        e.preventDefault();
+        jump();
+      });
+
+      window.addEventListener("keydown", onKeyDown);
+
+      // ─── Game lifecycle ───────────────────────────────────────────────
+      function startGame() {
+        state = STATE.PLAYING;
+        score = 0;
+        gameSpeed = BASE_SPEED;
+        frameCount = 0;
+        obstacles.length = 0;
+        spawnTimer = 0;
+        player.y = GROUND_Y;
+        player.vy = 0;
+        player.grounded = true;
+      }
+
+      function resetGame() {
+        state = STATE.IDLE;
+        score = 0;
+        gameSpeed = BASE_SPEED;
+        frameCount = 0;
+        obstacles.length = 0;
+        spawnTimer = 0;
+        player.y = GROUND_Y;
+        player.vy = 0;
+        player.grounded = true;
+      }
+
+      function endGame() {
+        state = STATE.GAME_OVER;
+        if (score > highScore) {
+          highScore = score;
+          localStorage.setItem("dinoHighScore", String(highScore));
+        }
+      }
+
+      // ─── Obstacle spawning ────────────────────────────────────────────
+      function spawnObstacle() {
+        const type = Math.random() < 0.7 ? "cactus" : "block";
+        let width, height;
+
+        if (type === "cactus") {
+          width = 14 + Math.floor(Math.random() * 10);
+          height = 28 + Math.floor(Math.random() * 16);
+        } else {
+          width = 20 + Math.floor(Math.random() * 16);
+          height = 20 + Math.floor(Math.random() * 12);
+        }
+
+        obstacles.push({
+          x: W + 10,
+          y: GROUND_Y,
+          width: width,
+          height: height,
+          type: type,
+        });
+      }
+
+      // ─── Collision (AABB) ─────────────────────────────────────────────
+      function collides(a, b) {
+        const pad = 4; // forgiving hitbox for playability
+        return (
+          a.x + pad < b.x + b.width - pad &&
+          a.x + a.width - pad > b.x + pad &&
+          a.y - a.height + pad < b.y &&
+          a.y - pad > b.y - b.height
+        );
+      }
+
+      // ─── Update ───────────────────────────────────────────────────────
+      function update() {
+        if (state !== STATE.PLAYING) return;
+
+        frameCount++;
+        score = Math.floor(frameCount / 6);
+        gameSpeed = Math.min(MAX_SPEED, BASE_SPEED + frameCount * SPEED_INCREMENT);
+
+        // Player physics
+        player.vy += GRAVITY;
+        player.y += player.vy;
+
+        if (player.y >= GROUND_Y) {
+          player.y = GROUND_Y;
+          player.vy = 0;
+          player.grounded = true;
+        }
+
+        // Running leg animation (toggle every 6 frames)
+        if (player.grounded) {
+          player.legFrame = Math.floor(frameCount / 6) % 2;
+        }
+
+        // Spawn obstacles
+        spawnTimer--;
+        if (spawnTimer <= 0) {
+          spawnObstacle();
+          const gapScale = Math.max(0.6, 1 - gameSpeed / MAX_SPEED * 0.3);
+          spawnTimer =
+            (minSpawnGap + Math.random() * (maxSpawnGap - minSpawnGap)) * gapScale;
+        }
+
+        // Move obstacles & check collision
+        for (let i = obstacles.length - 1; i >= 0; i--) {
+          const obs = obstacles[i];
+          obs.x -= gameSpeed;
+
+          if (obs.x + obs.width < 0) {
+            obstacles.splice(i, 1);
+            continue;
+          }
+
+          const playerBox = {
+            x: player.x,
+            y: player.y,
+            width: player.width,
+            height: player.height,
+          };
+          const obsBox = {
+            x: obs.x,
+            y: obs.y,
+            width: obs.width,
+            height: obs.height,
+          };
+
+          if (collides(playerBox, obsBox)) {
+            endGame();
+            return;
+          }
+        }
+      }
+
+      // ─── Draw helpers ─────────────────────────────────────────────────
+      function drawGround(theme) {
+        ctx.strokeStyle = theme.ground;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(0, GROUND_Y);
+        ctx.lineTo(W, GROUND_Y);
+        ctx.stroke();
+
+        // Simple ground dashes scrolling effect
+        ctx.fillStyle = theme.ground;
+        const dashOffset = (frameCount * gameSpeed * 0.3) % 20;
+        for (let x = -dashOffset; x < W; x += 20) {
+          ctx.fillRect(x, GROUND_Y + 4, 10, 2);
+        }
+      }
+
+      function drawPlayer(theme) {
+        const px = player.x;
+        const py = player.y - player.height;
+
+        ctx.fillStyle = theme.player;
+
+        // Body
+        ctx.fillRect(px + 4, py + 6, 16, 14);
+
+        // Head
+        ctx.fillRect(px + 10, py, 12, 10);
+
+        // Eye
+        ctx.fillStyle = isNight() ? "#2b2b2b" : "#fff";
+        ctx.fillRect(px + 18, py + 2, 3, 3);
+
+        // Legs (animated when running)
+        ctx.fillStyle = theme.player;
+        if (player.grounded) {
+          if (player.legFrame === 0) {
+            ctx.fillRect(px + 6, py + 20, 4, 8);
+            ctx.fillRect(px + 14, py + 20, 4, 6);
+          } else {
+            ctx.fillRect(px + 6, py + 20, 4, 6);
+            ctx.fillRect(px + 14, py + 20, 4, 8);
+          }
+        } else {
+          ctx.fillRect(px + 8, py + 20, 4, 6);
+          ctx.fillRect(px + 14, py + 18, 4, 6);
+        }
+
+        // Tail
+        ctx.fillRect(px, py + 10, 6, 4);
+      }
+
+      function drawCactus(x, y, w, h, theme) {
+        ctx.fillStyle = theme.obstacle;
+        const baseW = Math.min(w, 12);
+        ctx.fillRect(x + (w - baseW) / 2, y - h, baseW, h);
+
+        // Arms
+        if (h > 30) {
+          ctx.fillRect(x, y - h + 10, 6, 4);
+          ctx.fillRect(x - 4, y - h + 6, 4, 8);
+          ctx.fillRect(x + w - 6, y - h + 16, 6, 4);
+          ctx.fillRect(x + w - 2, y - h + 10, 4, 10);
+        }
+      }
+
+      function drawBlock(x, y, w, h, theme) {
+        ctx.fillStyle = theme.obstacle;
+        ctx.fillRect(x, y - h, w, h);
+        // Inner detail
+        ctx.fillStyle = isNight() ? "#666" : "#777";
+        ctx.fillRect(x + 3, y - h + 3, w - 6, h - 6);
+      }
+
+      function drawObstacles(theme) {
+        for (let i = 0; i < obstacles.length; i++) {
+          const o = obstacles[i];
+          if (o.type === "cactus") {
+            drawCactus(o.x, o.y, o.width, o.height, theme);
+          } else {
+            drawBlock(o.x, o.y, o.width, o.height, theme);
+          }
+        }
+      }
+
+      function drawHUD(theme) {
+        ctx.fillStyle = theme.text;
+        ctx.font = "bold 16px Courier New, monospace";
+        ctx.textAlign = "right";
+        ctx.fillText(formatScore(score), W - 10, 24);
+
+        ctx.textAlign = "left";
+        ctx.font = "12px Courier New, monospace";
+        ctx.fillText("HI " + formatScore(highScore), 10, 24);
+      }
+
+      function formatScore(n) {
+        return String(n).padStart(5, "0");
+      }
+
+      function drawOverlay(title, subtitle) {
+        const theme = getTheme();
+        ctx.fillStyle = "rgba(0,0,0,0.25)";
+        ctx.fillRect(0, 0, W, H);
+
+        ctx.fillStyle = theme.text;
+        ctx.textAlign = "center";
+
+        ctx.font = "bold 20px Courier New, monospace";
+        ctx.fillText(title, W / 2, H / 2 - 16);
+
+        ctx.font = "14px Courier New, monospace";
+        ctx.fillText(subtitle, W / 2, H / 2 + 12);
+      }
+
+      // ─── Main render ──────────────────────────────────────────────────
+      function draw() {
+        const theme = getTheme();
+
+        ctx.fillStyle = theme.bg;
+        ctx.fillRect(0, 0, W, H);
+
+        drawGround(theme);
+        drawPlayer(theme);
+        drawObstacles(theme);
+        drawHUD(theme);
+
+        if (state === STATE.IDLE) {
+          drawOverlay("PRESS SPACE TO START", "or tap / click");
+        } else if (state === STATE.GAME_OVER) {
+          drawOverlay("GAME OVER", "Score: " + score + "  |  Press Space to Restart");
+        }
+      }
+
+      // ─── Game loop ────────────────────────────────────────────────────
+      function loop() {
+        update();
+        draw();
+        requestAnimationFrame(loop);
+      }
+
+      // Start the loop (game begins in IDLE state)
+      requestAnimationFrame(loop);
+    })();
+  </script>
+</body>
+</html>
